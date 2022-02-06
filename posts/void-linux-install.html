@@ -1,0 +1,141 @@
+<!doctype html><html><head><title>Encrypted Void Installation | marcia.li</title><link href="/assets/style.css" rel="stylesheet"></head><body><h1 class="header">Encrypted Void Installation</h1><span class="date">Posted on 02/06/2022</span>
+
+<p class="paragraph en">
+I primarily created this for myself in the future when I install Void Linux on
+my devices. I cant possibly remember all of this and it usually has me scouring 
+the internet for deprecated articles. This may be of interest to others who need 
+an encrypted installation. The hardware I'm using is a Thinkpad T470s with a 256GB NVME SSD.
+</p><h1 class="header">Partitions</h1>
+<p class="paragraph en">
+The boot partition needs to be atleast <code class="code">260M</code>, 
+marked as <code class="code">EFI System</code>. Here's the excerpts for <code class="code">fdisk</code>.
+</p><code class="code">
+fdisk /dev/nvme0n1
+
+# Create a new GPT disklabel
+Command (m for help): g
+Created a new GPT disklabel (GUID: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX).
+
+# Create a new partition of 260M, this is the boot partition,
+# the partition number and first sector are the default
+Command (m for help): n
+Partition number (1-128, default 1): 
+First sector (2048-500118158, default 2048): 
+Last sector, +/-sectors or +/-size{K,M,G,T,P} (2048-500118158, default 500118158): +260M
+
+# Set the type of the boot partition to EFI System
+Command (m for help): t
+Selected partition 1
+Partition type (type L to list all types): 1
+Changed type of partition 'Linux filesystem' to 'EFI System'.
+
+# And the other partition for logical volumes,
+# the partition number, first, and last sector are the default
+Command (m for help): n
+Partition number (2-128, default 2): 
+First sector (534528-500118158, default 534528): 
+Last sector, +/-sectors or +/-size{K,M,G,T,P} (534528-500118158, default 500118158):
+
+# Good to go, type `w` to write to disk.
+</code><h1 class="header">Encryption</h1>
+<p class="paragraph en">
+I'm encrypting my second partition with the defualt cipher for LUKS (<code class="code">aes-xts-plain64</code>).
+</p><code class="code">
+cryptsetup --cipher aes-xts-plain64 --key-size 512 --hash sha512 --iter-time 2000 --align-payload=2048 -v luksFormat /dev/nvme0n1p2
+</code><p class="paragraph en">
+Now, to open it.
+</p><code class="code">cryptsetup luksOpen /dev/nvme0n1p2 voidlinux</code>
+
+<h1 class="header">Logical Volumes</h1>
+<code class="code">
+pvcreate /dev/mapper/voidlinux
+vgcreate voidlinux /dev/mapper/voidlinux
+
+# Consume the entire disk for the root partition
+lvcreate -l 100%FREE -n root voidlinux
+</code><h1 class="header">Filesystems</h1>
+<p class="paragraph en">
+The <code class="code">EFI System</code> partition must be formatted in <code class="code">FAT32</code>.
+</p><code class="code">mkfs.fat -F32 /dev/nvme0n1p1</code>
+
+<p class="paragraph en">
+For the root partition, I'm using <code class="code">XFS</code>, but you can use whatever.
+</p><code class="code">mkfs.xfs /dev/mapper/voidlinux-root</code>
+
+<h1 class="header">Mounting</h1>
+<code class="code">
+mount /dev/mapper/voidlinux-root /mnt
+mkdir /mnt/boot
+mount /dev/nvme0n1p1 /mnt/boot
+</code><h1 class="header">Installing the Base System</h1>
+<p class="paragraph en">
+I'm using the mirror <a class="link" href="https://mirrors.servercentral.com/voidlinux/current">https://mirrors.servercentral.com/voidlinux/current</a>
+because it's closest to my location, and has less issues. Selected from the <a class="link" href="https://docs.voidlinux.org/xbps/repositories/mirrors/index.html">list of mirrors</a>. 
+I've also added <code class="code">iwd</code> and <code class="code">vim</code>, for wifi and editing config files post-installation.
+</p><code class="code">
+export XBPS_ARCH=x86_64
+xbps-install -S -R https://mirrors.servercentral.com/voidlinux/current -r /mnt lvm2 cryptsetup grub-x86_64-efi base-system iwd vim
+</code><h1 class="header">Chroot</h1>
+<code class="code">
+mkdir /mnt/{dev,proc,sys}
+mount -t proc /proc /mnt/proc
+mount --rbind /dev /mnt/dev
+mount --rbind /sys /mnt/sys
+chroot /mnt /bin/bash
+</code><h1 class="header">Configuration</h1>
+<code class="code">
+# Set the root password 
+passwd root
+
+# Set the proper permissions
+chown root:root /
+chmod 755 /
+
+# Set the number of TTYs to 2 or more
+vim /etc/rc.conf
+
+# Set hostname
+echo T470s > /etc/hostname 
+
+# Uncomment desired locale
+vim /etc/default/libc-locales
+</code><h1 class="header">FSTAB</h1>
+<p class="paragraph en">
+<code class="code">lsblk</code> may not show the UUID, but you can use <code class="code">blkid /dev/nvme0n1p1</code> instead.
+</p><code class="code">
+lsblk -f
+NAME         FSTYPE FSVER LABEL     UUID                                   FSAVAIL FSUSE% MOUNTPOINT
+...                                 
+nvme0n1                                                                                   
+├─nvme0n1p1  vfat                   XXXX-XXXX                                 256M     0% /boot
+...
+
+# Now to edit /etc/fstab
+vim /etc/fstab 
+</code><p class="paragraph en">
+Edit your FSTAB to look something like this:
+</p><code class="code">
+# file system              dir     type       options                 dump      pass
+UUID=XXXX-XXXX             /boot   vfat       defaults                0         2
+/dev/mapper/voidlinux-root /       xfs        defaults                0         1
+tmpfs                      /tmp    tmpfs      defaults,nosuid,nodev   0         0
+</code><h1 class="header">Grub</h1>
+<code class="code">
+# If you get directory non-existent error, do this
+mkdir /boot/grub
+
+echo 'hostonly=yes' > /etc/dracut.conf.d/hostonly.conf
+
+# Add rd.auto=1 to GRUB_CMDLINE_LINUX_DEFAULT
+vim /etc/default/grub
+</code><h1 class="header">Reconfiguration</h1>
+<code class="code">
+xbps-reconfigure -fa 
+</code><h1 class="header">Exiting</h1>
+<code class="code">
+exit
+umount -R /mnt
+
+# And lastly...
+reboot 
+</code><hr class="seperator"><div class="post-footer"><a class="link" href="/">marcia.li</a><a class="link" href="https://github.com/dmarcia">GitHub</a><a class="link" href="https://github.com/dmarcia/marcia.li">Source</a></div><footer><span class="copyright">© dmarcia 2022</span></footer></body></html>
